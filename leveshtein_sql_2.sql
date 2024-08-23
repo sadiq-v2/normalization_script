@@ -1,24 +1,5 @@
-select * from companies
-select * from companies_bfr
 
-SELECT country_raw, LENGTH(country_raw) AS length
-FROM companies
-ORDER BY length DESC
-
-SELECT DISTINCT country_raw
-FROM companies;
-
-
-SELECT DISTINCT iso2 AS country FROM worldcities;
-SELECT DISTINCT country_raw AS country FROM companies;
-
-SELECT DISTINCT admin_name_ascii as state FROM worldcities;
-SELECT DISTINCT region as state from companies
-
-SELECT DISTINCT city_ascii as state FROM worldcities;
-SELECT DISTINCT city as state from companies
-
----------------------alter table -------------------
+---------------------   Alter table ------------------------------------------------------
 ALTER TABLE companies
 RENAME COLUMN country TO country_raw;
  
@@ -37,7 +18,8 @@ ADD COLUMN city VARCHAR(255);
 ALTER TABLE companies
 ADD COLUMN region VARCHAR(255);
  
------------------------------------Normalize Country---------------------------------------------------------
+-----------------------------------Normalize Country-----------------------------------------
+EXPLAIN ANALYZE
 WITH distinct_worldcities AS (
     SELECT DISTINCT iso2
     FROM worldcities
@@ -62,10 +44,11 @@ WHERE
     AND closest_country_match.rn = 1
     AND closest_country_match.distance <= 2;
 
----------------------------------------Normalized state/region--------------------------------------------------------------
+---------------------------------------Normalize state/region----------------------------------------
+EXPLAIN ANALYZE
 WITH distinct_worldcities AS (
-    SELECT DISTINCT admin_name_ascii
-    FROM worldcities
+    SELECT DISTINCT admin_name_ascii,iso2
+    FROM worldcities WHERE admin_name_ascii IS NOT NULL AND iso2 IS NOT NULL
 ),
 closest_state_match AS (
     SELECT 
@@ -76,45 +59,47 @@ closest_state_match AS (
         ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY levenshtein(c.region_raw, wc.admin_name_ascii)) AS rn
     FROM 
         companies c
-    CROSS JOIN --do join on country to reduce comparisions
+    inner JOIN 
         distinct_worldcities wc
+		on  c.country = wc.iso2
 ) 
 UPDATE companies
-SET region = closest_state_match.normalized_state
+	SET region =  closest_state_match.normalized_state 
 FROM closest_state_match
 WHERE 
     companies.id = closest_state_match.id
     AND closest_state_match.rn = 1
     AND closest_state_match.distance <= 2;
----------------------------------------------City----------------------------------------------------
-WITH closest_match AS (
+
+------------------------------------------Normalize City----------------------------------------------------
+EXPLAIN ANALYZE
+WITH distinct_worldcities AS (
+    SELECT DISTINCT city_ascii,admin_name_ascii
+    FROM worldcities
+	
+),
+closest_city_match AS (
     SELECT 
-        c.id AS company_id,
-        c.city_raw AS company_city,
+        c.id,
+        c.city_raw,
         wc.city_ascii AS normalized_city,
-        ROW_NUMBER() OVER (
-            PARTITION BY c.id 
-            ORDER BY 
-                levenshtein(lower(c.city_raw), lower(wc.city_ascii))
-        ) AS rn
+        levenshtein(c.city_raw, wc.city_ascii) AS distance,
+        ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY levenshtein(c.city_raw, wc.city_ascii)) AS rn
     FROM 
         companies c
-    JOIN 
-        worldcities wc 
-    ON 
-        c.country_raw = wc.iso2 -- use state/region for this join
-    -- AND
-        -- LEFT(lower(c.city_raw), 2) = LEFT(lower(wc.city_ascii), 2)  -- Corrected usage of LOWER and LEFT
-)
+    inner JOIN 
+        distinct_worldcities wc
+		on  c.region = wc.admin_name_ascii
+) 
 UPDATE companies
-SET city = COALESCE(closest_match.normalized_city, companies.city_raw)
-FROM closest_match
+SET city = closest_city_match.normalized_city
+FROM closest_city_match
 WHERE 
-    companies.id = closest_match.company_id
-    AND closest_match.rn = 1
-    AND levenshtein(lower(companies.city_raw), lower(closest_match.normalized_city)) <= 2;  -- Optional: add distance filter
+    companies.id = closest_city_match.id
+    AND closest_city_match.rn = 1
+    AND closest_city_match.distance <= 2;
 
--------------------------------------------------------------------------------------------
+---------------------analysis on Normalization ----------------------------------
 SELECT
     SUM(CASE WHEN city IS NULL THEN 1 ELSE 0 END) AS null_city,
     SUM(CASE WHEN region IS NULL THEN 1 ELSE 0 END) AS null_region,
@@ -129,42 +114,235 @@ SELECT
 FROM 
     companies;
 
--------------------------------test-------------------------------
+----------city-----------------------
 SELECT 
-    c1.city as before_city,
-    c2.city as after_city,
-    levenshtein(c1.city, c2.city) AS levenshtein_distance
+    city_raw AS before_city,
+    city AS after_city,
+    levenshtein(city_raw, city) AS levenshtein_distance
 FROM 
-    companies_bfr c1
-inner JOIN 
-    companies c2
-	on c1.id = c2.id
-order by levenshtein_distance ASC
-
-SELECT 
-    c1.region as before_region,
-    c2.region as after_region,
-    levenshtein(c1.region, c2.region) AS levenshtein_distance
-FROM 
-    companies_bfr c1
-inner JOIN 
-    companies c2
-	on c1.id = c2.id
-order by levenshtein_distance ASC
+    companies
+WHERE 
+    levenshtein(city_raw, city) BETWEEN 1 AND 3  -- Filter to only distances of 1 or 2
+ORDER BY 
+    levenshtein_distance ASC;
 
 SELECT 
-    c1.country as before_country,
-    c2.country as after_country,
-    levenshtein(c1.country, c2.country) AS levenshtein_distance
+    city_raw AS before_city,
+    city AS after_city,
+	levenshtein(city_raw, city) AS levenshtein_distance
 FROM 
-    companies_bfr c1
-inner JOIN 
-    companies c2
-	on c1.id = c2.id
-order by levenshtein_distance desc
+    companies
+WHERE 
+    city_raw != city  -- Compare city_raw and city
+ORDER BY 
+    levenshtein_distance ASC;  -- Order by Levenshtein distance
 
 
+SELECT 
+    levenshtein(city_raw, city) AS levenshtein_distance,
+    COUNT(*) AS count
+FROM 
+    companies
+WHERE 
+    levenshtein(city_raw, city) IN (1, 2)
+GROUP BY 
+    levenshtein_distance
+ORDER BY 
+    levenshtein_distance ASC;
+
+
+SELECT 
+    region_raw AS before_region,
+    region AS after_region,
+	levenshtein(region_raw, region) AS levenshtein_distance
+FROM 
+    companies
+WHERE 
+    region_raw != region  -- Compare city_raw and city
+ORDER BY 
+    levenshtein_distance ASC;  -- Order by Levenshtein distance
+	
+------------region ---------------------------------------------
+SELECT 
+    region_raw AS before_region,
+    region AS after_region,
+    levenshtein(region_raw, region) AS levenshtein_distance
+FROM 
+    companies
+WHERE 
+    levenshtein(region_raw, region) BETWEEN 1 AND 3  -- Filter to only distances of 1 or 2
+ORDER BY 
+    levenshtein_distance ASC;
+
+
+SELECT 
+    levenshtein(region_raw, region) AS levenshtein_distance,
+    COUNT(*) AS count
+FROM 
+    companies
+WHERE 
+    levenshtein(region_raw, region) IN (1, 2)
+GROUP BY 
+    levenshtein_distance
+ORDER BY 
+    levenshtein_distance ASC;
+
+------------------------------------21/08/2024------------------------------------------
 select  country_raw = country from  companies   
 select country_raw = country , count(*) from  companies group by country_raw = country
 select count(distinct companies.country )  from companies inner join worldcities on companies.country = worldcities.iso2
+
 select region_raw = region , count(*) from  companies group by region_raw = region 
+
+select city_raw = city , count(*) from  companies group by city_raw = city
+
+SELECT 
+    CASE 
+        WHEN city_raw = city THEN 'TRUE'
+        WHEN city_raw IS NULL OR city IS NULL THEN 'NULL'
+        ELSE 'FALSE'
+    END AS city_status,
+    COUNT(*) AS count,
+    (COUNT(*) * 100.0 / 1000) AS percentage  
+FROM 
+    companies
+GROUP BY 
+    CASE 
+        WHEN city_raw = city THEN 'TRUE'
+        WHEN city_raw IS NULL OR city IS NULL THEN 'NULL'
+        ELSE 'FALSE'
+    END
+ORDER BY 
+    city_status;
+
+
+SELECT 
+    CASE 
+        WHEN region_raw = region THEN 'TRUE'
+        WHEN region_raw IS NULL OR region IS NULL THEN 'NULL'
+        ELSE 'FALSE'
+    END AS region_status,
+    COUNT(*) AS count,
+    (COUNT(*) * 100.0 / 1000) AS percentage  
+FROM 
+    companies
+GROUP BY 
+    CASE 
+        WHEN region_raw = region THEN 'TRUE'
+        WHEN region_raw IS NULL OR region IS NULL THEN 'NULL'
+        ELSE 'FALSE'
+    END
+ORDER BY 
+    region_status;
+
+---------------------------------------------------
+ 
+----------Table initial analysis ---------------------------------------------
+select * from companies
+
+SELECT country_raw, LENGTH(country_raw) AS length 
+FROM companies
+ORDER BY length DESC
+
+SELECT DISTINCT country_raw
+FROM companies;
+
+SELECT DISTINCT iso2 AS country FROM worldcities;
+SELECT DISTINCT country_raw AS country FROM companies;
+
+SELECT DISTINCT admin_name_ascii as state FROM worldcities;
+SELECT DISTINCT region as state from companies
+
+SELECT DISTINCT city_ascii as city FROM worldcities;
+SELECT DISTINCT city_raw as city_raw from companies
+
+select city_ascii,iso2 from worldcities where city_ascii ='Quarry Bay'
+select city,country from companies_bfr where city ='Quarry Bay'
+select city_raw from companies where city_raw ='England'
+select admin_name_ascii,iso2 from worldcities where admin_name_ascii ='England'
+select admin_name_ascii,iso2 from worldcities where admin_name_ascii ='Haifa'
+
+SELECT 
+    CASE 
+        WHEN c.region_raw = wc.admin_name_ascii THEN 'Match'
+        ELSE 'No Match'
+    END AS match_region_status,
+    COUNT(*) AS count
+FROM 
+    companies c
+LEFT JOIN 
+    worldcities wc
+ON 
+    c.country = wc.iso2  -- Ensure the country matches
+    AND LOWER(c.region_raw) = LOWER(wc.admin_name_ascii)  -- Compare region/state names
+GROUP BY 
+    match_region_status;
+
+
+SELECT 
+    CASE 
+        WHEN c.city_raw = wc.city_ascii THEN 'Match'
+        ELSE 'No Match'
+    END AS match_city_status,
+    COUNT(*) AS count
+FROM 
+    companies c
+LEFT JOIN 
+    worldcities wc
+ON 
+    c.region_raw = wc.admin_name_ascii  -- Ensure the country matches
+    AND LOWER(c.city_raw) = LOWER(wc.city_ascii)  -- Compare region/state names
+GROUP BY 
+    match_city_status;
+
+SELECT 
+    CASE 
+        WHEN c.city_raw = wc.city_ascii THEN 'Match'
+        ELSE 'No Match'
+    END AS match_city_status,
+    COUNT(*) AS count
+FROM 
+    companies c
+LEFT JOIN 
+    worldcities wc
+ON 
+    c.city_raw = wc.city_ascii  -- Ensure the country matches
+    AND LOWER(c.city_raw) = LOWER(wc.city_ascii)  -- Compare region/state names
+GROUP BY 
+    match_city_status;
+
+
+SELECT 
+    c.city_raw AS non_matching_city,
+    COUNT(*) AS count
+FROM 
+    companies c
+LEFT JOIN 
+    worldcities wc
+ON 
+    c.region_raw = wc.admin_name_ascii  -- Ensure the region matches
+    AND LOWER(c.city_raw) = LOWER(wc.city_ascii)  -- Compare city names
+WHERE 
+    c.city_raw IS NOT NULL 
+    AND (wc.city_ascii IS NULL OR c.city_raw != wc.city_ascii)  -- Filter non-matching cities
+GROUP BY 
+    c.city_raw;
+
+
+ SELECT 
+    c.region_raw AS non_matching_region,
+    COUNT(*) AS count
+FROM 
+    companies c
+LEFT JOIN 
+    worldcities wc
+ON 
+    c.country_raw = wc.iso2  -- Ensure the region matches
+    
+WHERE 
+    c.region_raw IS NOT NULL 
+    AND (wc.admin_name_ascii IS NULL OR c.region_raw != wc.admin_name_ascii)  -- Filter non-matching cities
+GROUP BY 
+    c.region_raw;
+
+--------------------------------------------------------------------------------------
